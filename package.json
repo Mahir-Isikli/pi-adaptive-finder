@@ -1,0 +1,54 @@
+{
+  "name": "pi-adaptive-finder",
+  "version": "0.1.0",
+  "description": "Fast local workspace Finder for Pi using rg retrieval plus configurable OpenAI-compatible rerankers",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "finder",
+    "code-search",
+    "workspace-search",
+    "groq",
+    "cerebras",
+    "openai-compatible"
+  ],
+  "license": "Apache-2.0",
+  "author": "Mahir Isikli",
+  "homepage": "https://github.com/Mahir-Isikli/pi-adaptive-finder#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mahir-Isikli/pi-adaptive-finder.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Mahir-Isikli/pi-adaptive-finder/issues"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/index.ts"
+    ]
+  },
+  "files": [
+    "extensions/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "check": "tsc --noEmit",
+    "pack:check": "npm pack --dry-run",
+    "prepublishOnly": "npm run check && npm run pack:check"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@mariozechner/pi-coding-agent": "latest",
+    "@types/node": "^25.6.0",
+    "typebox": "latest",
+    "typescript": "^5.9.3"
+  }
+}
