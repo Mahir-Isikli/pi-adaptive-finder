@@ -1,6 +1,6 @@
 {
   "name": "pi-adaptive-finder",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Fast local workspace Finder for Pi using rg retrieval plus configurable OpenAI-compatible rerankers",
   "type": "module",
   "keywords": [
@@ -42,11 +42,11 @@
     "access": "public"
   },
   "peerDependencies": {
-    "@mariozechner/pi-coding-agent": "*",
+    "@earendil-works/pi-coding-agent": "*",
     "typebox": "*"
   },
   "devDependencies": {
-    "@mariozechner/pi-coding-agent": "latest",
+    "@earendil-works/pi-coding-agent": "^0.74.0",
     "@types/node": "^25.6.0",
     "typebox": "latest",
     "typescript": "^5.9.3"
