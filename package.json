@@ -1,6 +1,6 @@
 {
   "name": "pi-adaptive-finder",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Fast local workspace Finder for Pi using rg retrieval plus configurable OpenAI-compatible rerankers",
   "type": "module",
   "keywords": [

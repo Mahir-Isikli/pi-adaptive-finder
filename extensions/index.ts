@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { access, stat } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
@@ -69,14 +69,26 @@ const STOP_WORDS = new Set([
   "about",
   "after",
   "also",
+  "anchor",
+  "anchors",
   "and",
   "api",
   "are",
+  "broad",
+  "broadly",
   "bug",
   "can",
   "code",
   "component",
+  "config",
+  "core",
+  "cited",
   "does",
+  "doc",
+  "docs",
+  "entrypoint",
+  "entrypoints",
+  "exact",
   "file",
   "files",
   "find",
@@ -86,17 +98,31 @@ const STOP_WORDS = new Set([
   "hook",
   "how",
   "impl",
+  "implementation",
+  "implementations",
   "implemented",
+  "include",
+  "including",
   "into",
+  "likely",
+  "line",
+  "local",
   "logic",
   "map",
   "need",
   "page",
   "path",
+  "project",
+  "repo",
+  "repository",
   "return",
+  "related",
+  "search",
   "service",
   "show",
   "task",
+  "test",
+  "tests",
   "that",
   "the",
   "this",
@@ -107,10 +133,13 @@ const STOP_WORDS = new Set([
   "where",
   "which",
   "with",
+  "workspace",
 ]);
 
 type Candidate = {
   path: string;
+  relativePath: string;
+  root: string;
   score: number;
   evidence: string[];
 };
@@ -149,6 +178,7 @@ type FinderStatus = "done" | "error";
 type FinderDetails = {
   status: FinderStatus;
   workspace: string;
+  workspaces?: string[];
   mode: "adaptive";
   rerankers: Array<{
     name: string;
@@ -221,6 +251,71 @@ function stripCodeFence(text: string): string {
 
 function normalizePath(value: string): string {
   return value.trim().replace(/^`|`$/g, "").replace(/^\.\//u, "");
+}
+
+function expandHome(value: string): string {
+  if (value === "~") return process.env.HOME ?? value;
+  if (value.startsWith("~/")) return path.join(process.env.HOME ?? "", value.slice(2));
+  return value;
+}
+
+function cleanPathMention(value: string): string {
+  return expandHome(value.trim().replace(/[.,;:!?\])}]+$/u, ""));
+}
+
+function displayPathForRoot(root: string, relativePath: string, absoluteOutput: boolean): string {
+  return absoluteOutput ? path.join(root, relativePath) : relativePath;
+}
+
+async function resolveExistingDirectory(rawPath: string, baseCwd: string): Promise<string | undefined> {
+  let candidate = path.resolve(baseCwd, cleanPathMention(rawPath));
+  for (;;) {
+    try {
+      const st = await stat(candidate);
+      if (st.isDirectory()) return candidate;
+      if (st.isFile()) return path.dirname(candidate);
+    } catch {
+      // Try the nearest existing parent below.
+    }
+
+    const parent = path.dirname(candidate);
+    if (parent === candidate) return undefined;
+    candidate = parent;
+  }
+}
+
+function extractPathMentions(query: string): string[] {
+  const mentions: string[] = [];
+  for (const match of query.matchAll(/["'`]((?:~|\/)[^"'`\n]+)["'`]/gu)) {
+    mentions.push(match[1] ?? "");
+  }
+  for (const match of query.matchAll(/(?:^|\s)((?:~|\/)[^\s,;\])}]+)/gu)) {
+    mentions.push(match[1] ?? "");
+  }
+  return uniq(mentions.map(cleanPathMention).filter(Boolean));
+}
+
+function readStringArray(value: unknown): string[] {
+  if (typeof value === "string" && value.trim()) return [value.trim()];
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim());
+}
+
+async function resolveSearchRoots(params: Record<string, unknown>, query: string, ctxCwd: string): Promise<string[]> {
+  const explicitRoots = [
+    ...readStringArray(params.cwd),
+    ...readStringArray(params.root),
+    ...readStringArray(params.roots),
+  ];
+  const rawRoots = explicitRoots.length > 0 ? explicitRoots : extractPathMentions(query);
+  const resolved: string[] = [];
+
+  for (const rawRoot of rawRoots.slice(0, 4)) {
+    const root = await resolveExistingDirectory(rawRoot, ctxCwd);
+    if (root) resolved.push(root);
+  }
+
+  return uniq(resolved.length > 0 ? resolved : [path.resolve(ctxCwd)]);
 }
 
 function tokenize(query: string): string[] {
@@ -298,8 +393,14 @@ function scorePath(file: string, tokens: string[]): number {
   return score;
 }
 
-async function buildCandidateMap(cwd: string, query: string, config: FinderConfig): Promise<{ candidates: Candidate[]; tokens: string[] }> {
-  const files = await getWorkspaceFiles(cwd);
+async function buildCandidateMap(
+  cwd: string,
+  query: string,
+  config: FinderConfig,
+  absoluteOutput = false,
+): Promise<{ candidates: Candidate[]; tokens: string[] }> {
+  const root = path.resolve(cwd);
+  const files = await getWorkspaceFiles(root);
   if (files.length === 0) return { candidates: [], tokens: [] };
 
   const filesSet = new Set(files);
@@ -309,7 +410,10 @@ async function buildCandidateMap(cwd: string, query: string, config: FinderConfi
   const candidateMap = new Map<string, Candidate>();
   for (const file of files) {
     const score = scorePath(file, tokens);
-    if (score > 0) candidateMap.set(file, { path: file, score, evidence: [] });
+    if (score > 0) {
+      const candidatePath = displayPathForRoot(root, file, absoluteOutput);
+      candidateMap.set(candidatePath, { path: candidatePath, relativePath: file, root, score, evidence: [] });
+    }
   }
 
   const patterns = tokens.filter((token) => token.length >= 4).slice(0, 24);
@@ -337,7 +441,14 @@ async function buildCandidateMap(cwd: string, query: string, config: FinderConfi
         const file = normalizePath(match[1] ?? "");
         if (!filesSet.has(file)) continue;
 
-        const candidate = candidateMap.get(file) ?? { path: file, score: 0, evidence: [] };
+        const candidatePath = displayPathForRoot(root, file, absoluteOutput);
+        const candidate = candidateMap.get(candidatePath) ?? {
+          path: candidatePath,
+          relativePath: file,
+          root,
+          score: 0,
+          evidence: [],
+        };
         candidate.score += 1;
 
         const text = (match[3] ?? "").trim().replace(/\s+/g, " ");
@@ -349,7 +460,7 @@ async function buildCandidateMap(cwd: string, query: string, config: FinderConfi
         if (candidate.evidence.length < config.maxEvidenceLines) {
           candidate.evidence.push(`${match[2]}: ${text.slice(0, 220)}`);
         }
-        candidateMap.set(file, candidate);
+        candidateMap.set(candidatePath, candidate);
       }
     } catch {
       // rg exits non-zero when there are no matches. Path scoring can still work.
@@ -364,13 +475,34 @@ async function buildCandidateMap(cwd: string, query: string, config: FinderConfi
   return { candidates, tokens };
 }
 
+async function buildCandidateMapForRoots(
+  roots: string[],
+  query: string,
+  config: FinderConfig,
+  ctxCwd: string,
+): Promise<{ candidates: Candidate[]; tokens: string[] }> {
+  const normalizedRoots = uniq(roots.map((root) => path.resolve(root)));
+  const absoluteOutput = normalizedRoots.length > 1 || normalizedRoots.some((root) => root !== path.resolve(ctxCwd));
+  const results = await Promise.all(
+    normalizedRoots.map((root) => buildCandidateMap(root, query, config, absoluteOutput)),
+  );
+
+  return {
+    candidates: results
+      .flatMap((result) => result.candidates)
+      .sort((a, b) => b.score - a.score || a.path.localeCompare(b.path))
+      .slice(0, config.maxCandidates),
+    tokens: uniq(results.flatMap((result) => result.tokens)),
+  };
+}
+
 function formatCandidatePrompt(query: string, candidates: Candidate[], config: FinderConfig): string {
   const lines = candidates.map((candidate, index) => {
     const evidence = candidate.evidence.length > 0 ? ` evidence: ${candidate.evidence.slice(0, 2).join(" | ")}` : "";
     return `${index + 1}. ${candidate.path} [score=${candidate.score.toFixed(1)}]${evidence}`;
   });
 
-  return `You are a fast read-only codebase Finder reranker. Select the repo files most likely to answer the task.\n\nTask:\n${query.trim()}\n\nCandidate files from grouped path + ripgrep retrieval:\n${lines.join("\n").slice(0, config.maxPromptChars)}\n\nReturn only JSON, no markdown. Format:\n[{"path":"relative/path.ts","reason":"short reason","confidence":0.0}]\n\nRules:\n- Choose 3 to ${config.maxSelected} existing candidate paths only.\n- Prefer implementation entrypoints, hooks/services/API clients, tests, config, and docs that directly unblock the task.\n- Do not invent paths.\n- Keep reasons under 14 words.`;
+  return `You are a fast read-only codebase Finder reranker. Select the repo files most likely to answer the task.\n\nTask:\n${query.trim()}\n\nCandidate files from grouped path + ripgrep retrieval:\n${lines.join("\n").slice(0, config.maxPromptChars)}\n\nReturn only JSON, no markdown. Format:\n[{"path":"exact/candidate/path.ts","reason":"short reason","confidence":0.0}]\n\nRules:\n- Choose 3 to ${config.maxSelected} existing candidate paths only.\n- Copy the candidate path exactly as listed, including absolute prefixes when present.\n- Prefer implementation entrypoints, hooks/services/API clients, tests, config, and docs that directly unblock the task.\n- Do not invent paths.\n- Keep reasons under 14 words.`;
 }
 
 function parseModelPicks(text: string): ModelPick[] {
@@ -397,7 +529,7 @@ function parseModelPicks(text: string): ModelPick[] {
       })
       .filter((pick): pick is ModelPick => Boolean(pick?.path));
   } catch {
-    const paths = cleaned.match(/[A-Za-z0-9._/-]+\.[A-Za-z0-9]+/g) ?? [];
+    const paths = cleaned.match(/(?:~|\/)?[A-Za-z0-9._/-]+\.[A-Za-z0-9]+/g) ?? [];
     return uniq(paths.map(normalizePath)).map((p) => ({ path: p }));
   }
 }
@@ -583,19 +715,6 @@ async function runReranker(
   }
 }
 
-async function pathExists(cwd: string, relativePath: string): Promise<boolean> {
-  try {
-    const absolutePath = path.resolve(cwd, relativePath);
-    const root = path.resolve(cwd);
-    if (absolutePath !== root && !absolutePath.startsWith(root + path.sep)) return false;
-    await access(absolutePath);
-    const st = await stat(absolutePath);
-    return st.isFile();
-  } catch {
-    return false;
-  }
-}
-
 function evidenceCitation(candidate: Candidate | undefined): string | undefined {
   if (!candidate || candidate.evidence.length === 0) return undefined;
   const first = candidate.evidence[0];
@@ -618,18 +737,12 @@ function selectedBy(pathValue: string, runs: RerankerRun[]): string {
     .join("+");
 }
 
-async function selectPaths(cwd: string, candidates: Candidate[], modelRuns: RerankerRun[], config: FinderConfig): Promise<string[]> {
+async function selectPaths(candidates: Candidate[], modelRuns: RerankerRun[], config: FinderConfig): Promise<string[]> {
   const candidateByPath = new Map(candidates.map((candidate, index) => [candidate.path, { candidate, index }]));
   const localTop = candidates.slice(0, Math.max(10, config.maxSelected)).map((candidate) => candidate.path);
   const rawModelPaths = uniq(modelRuns.flatMap((run) => run.picks.map((pick) => pick.path)));
   const candidatePathSet = new Set(candidates.map((candidate) => candidate.path));
-  const existingModelPaths = (
-    await Promise.all(
-      rawModelPaths.map(async (pathValue) =>
-        candidatePathSet.has(pathValue) && (await pathExists(cwd, pathValue)) ? pathValue : undefined,
-      ),
-    )
-  ).filter((value): value is string => Boolean(value));
+  const existingModelPaths = rawModelPaths.filter((pathValue) => candidatePathSet.has(pathValue));
 
   const scored = new Map<string, number>();
   const addScore = (pathValue: string, score: number) => scored.set(pathValue, (scored.get(pathValue) ?? 0) + score);
@@ -653,6 +766,7 @@ async function selectPaths(cwd: string, candidates: Candidate[], modelRuns: Rera
 
 function formatMarkdown(
   query: string,
+  roots: string[],
   candidates: Candidate[],
   selectedPaths: string[],
   modelRuns: RerankerRun[],
@@ -703,22 +817,31 @@ function formatMarkdown(
   lines.push("");
   lines.push("## Searched");
   lines.push(`- Query: ${query.trim()}`);
+  lines.push(`- Workspace${roots.length === 1 ? "" : "s"}: ${roots.join(", ")}`);
   lines.push(`- Candidate retrieval: ${candidates.length} grouped files from rg/path scoring.`);
   lines.push(`- Rerankers: ${modelRuns.length > 0 ? modelRuns.map((run) => `${run.label}${run.ok ? "" : " failed"}`).join(", ") : "none, local ranking only"}.`);
 
   return lines.join("\n");
 }
 
-async function runAdaptiveFinder(query: string, ctx: ExtensionContext, signal: AbortSignal | undefined, config: FinderConfig) {
+async function runAdaptiveFinder(
+  query: string,
+  params: Record<string, unknown>,
+  ctx: ExtensionContext,
+  signal: AbortSignal | undefined,
+  config: FinderConfig,
+) {
   const startedAt = Date.now();
-  const { candidates } = await buildCandidateMap(ctx.cwd, query, config);
+  const roots = await resolveSearchRoots(params, query, ctx.cwd);
+  const { candidates } = await buildCandidateMapForRoots(roots, query, config, ctx.cwd);
   if (candidates.length === 0) {
-    const text = "No candidate files found. Adaptive Finder needs ripgrep (`rg`) and a query with concrete terms.";
+    const text = `No candidate files found in ${roots.join(", ")}. Adaptive Finder needs ripgrep (\`rg\`) and a query with concrete terms.`;
     return {
       content: [{ type: "text" as const, text }],
       details: {
         status: "error",
         workspace: ctx.cwd,
+        workspaces: roots,
         mode: "adaptive",
         rerankers: [],
         candidates: 0,
@@ -729,20 +852,21 @@ async function runAdaptiveFinder(query: string, ctx: ExtensionContext, signal: A
     };
   }
 
-  onProgress(ctx, `Adaptive Finder: ${candidates.length} candidates from rg/path retrieval`);
+  onProgress(ctx, `Adaptive Finder: ${candidates.length} candidates from ${roots.length} workspace${roots.length === 1 ? "" : "s"}`);
 
   const rerankers = await getAvailableRerankers(config);
   const prompt = formatCandidatePrompt(query, candidates, config);
   const modelRuns = await Promise.all(rerankers.map((reranker) => runReranker(reranker, prompt, config, signal)));
-  const selectedPaths = await selectPaths(ctx.cwd, candidates, modelRuns, config);
+  const selectedPaths = await selectPaths(candidates, modelRuns, config);
   const elapsedMs = Date.now() - startedAt;
-  const markdown = formatMarkdown(query, candidates, selectedPaths, modelRuns, elapsedMs);
+  const markdown = formatMarkdown(query, roots, candidates, selectedPaths, modelRuns, elapsedMs);
 
   return {
     content: [{ type: "text" as const, text: markdown }],
     details: {
       status: "done",
       workspace: ctx.cwd,
+      workspaces: roots,
       mode: "adaptive",
       rerankers: modelRuns.map((run) => ({
         name: run.name,
@@ -777,6 +901,19 @@ export default function adaptiveFinderExtension(pi: ExtensionAPI) {
         description:
           "Describe the end goal for reconnaissance, likely scope, search hints, and the deliverable you want. Example: 'Find where saved views are implemented in Nexus, including hooks, API clients, mocks, and tests.'",
       }),
+      cwd: Type.Optional(
+        Type.String({
+          description:
+            "Directory/repo/worktree to search instead of the Pi session cwd. Use this for sibling repos, worktrees, or installed Pi packages.",
+        }),
+      ),
+      root: Type.Optional(Type.String({ description: "Alias for cwd." })),
+      roots: Type.Optional(
+        Type.Array(Type.String(), {
+          description:
+            "Multiple directories/repos to search together. Results from non-session roots are returned as absolute paths.",
+        }),
+      ),
     }),
 
     async execute(_toolCallId, params, signal, _onUpdate, ctx: ExtensionContext) {
@@ -798,7 +935,7 @@ export default function adaptiveFinderExtension(pi: ExtensionAPI) {
         };
       }
 
-      return runAdaptiveFinder(query, ctx, signal, config);
+      return runAdaptiveFinder(query, params as Record<string, unknown>, ctx, signal, config);
     },
   });
 

@@ -1,6 +1,6 @@
 # pi-adaptive-finder
 
-Fast read-only Finder for Pi. It uses local `rg` and path retrieval first, then optionally reranks candidate files with fast OpenAI-compatible providers such as Cerebras or Groq.
+Fast read-only Finder for Pi. It uses local `rg` and path retrieval first, then optionally reranks candidate files with fast OpenAI-compatible providers such as Cerebras or Groq. It supports explicit `cwd`/`root`/`roots` scoping and also auto-detects absolute path mentions in the query.
 
 ## Why
 
@@ -39,6 +39,26 @@ Example prompt inside Pi:
 ```text
 Use adaptive_finder to find where saved views are implemented in Nexus, including hooks, API clients, mocks, and tests.
 ```
+
+Useful parameters:
+
+| Parameter | Description |
+|---|---|
+| `query` | Broad reconnaissance task, search hints, and desired deliverable. |
+| `cwd` | Directory/repo/worktree to search instead of the Pi session cwd. |
+| `root` | Alias for `cwd`. |
+| `roots` | Multiple directories/repos to search together. Non-session results are returned as absolute paths. |
+
+Prefer `cwd` or `roots` whenever the target is a sibling repo, a worktree, or an installed Pi package:
+
+```json
+{
+  "query": "Find the tff-fff tool implementation and tool registration files.",
+  "cwd": "/opt/homebrew/lib/node_modules/@the-forge-flow/fff-pi"
+}
+```
+
+If no explicit root is provided, Adaptive Finder scans the query for absolute paths like `/Users/.../Git/project` and searches those roots automatically.
 
 To replace an existing `finder` tool instead:
 
